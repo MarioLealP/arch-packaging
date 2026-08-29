@@ -4,10 +4,8 @@ name: generic-pkg
 #   jobs:
 #     pkg:
 #       uses: pkgs/packaging/.gitea/workflows/generic-pkg.yml@main
-#       with:
-#         pkgname: my-package
-#       secrets:
-#         PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+#       with: { pkgname: my-package }
+#       secrets: { PACKAGE_TOKEN: '${{ secrets.PACKAGE_TOKEN }}' }
 
 on:
   workflow_call:
@@ -36,10 +34,8 @@ jobs:
       - name: deps
         run: |
           set -euo pipefail
-          pacman -Syu --noconfirm --needed git namcap libarchive shellcheck \
-            ${{ inputs.extra_pacman_deps }}
-          pacman -S --noconfirm --needed trivy || \
-            curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          pacman -Syu --noconfirm --needed \
+            nodejs git namcap libarchive shellcheck trivy ${{ inputs.extra_pacman_deps }}
 
       - uses: actions/checkout@v4
         with:
@@ -48,11 +44,12 @@ jobs:
       - name: trivy fs (secrets, misconfig)
         run: trivy fs --scanners secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
 
-      - name: shellcheck any scripts
+      - name: shellcheck
         run: |
+          set -euo pipefail
           shopt -s globstar nullglob
-          files=(**/*.sh)
-          [ ${#files[@]} -eq 0 ] || shellcheck "${files[@]}"
+          f=(**/*.sh)
+          [ ${#f[@]} -eq 0 ] || shellcheck "${f[@]}"
 
       - name: makepkg
         run: |
@@ -64,22 +61,21 @@ jobs:
       - name: trivy rootfs (built package)
         run: |
           set -euo pipefail
-          mkdir _pkg && bsdtar -C _pkg -xf "${{ inputs.pkgname }}"-*.pkg.tar.zst
+          mkdir _pkg
+          bsdtar -C _pkg -xf ${{ inputs.pkgname }}-*.pkg.tar.zst
           trivy rootfs --severity HIGH,CRITICAL --exit-code 1 --no-progress _pkg
 
       - name: namcap (report only)
-        run: namcap "${{ inputs.pkgname }}"-*.pkg.tar.zst || true
+        run: namcap ${{ inputs.pkgname }}-*.pkg.tar.zst || true
 
-      - name: publish
+      - name: publish to the clockmost Arch registry
         if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          TOKEN: ${{ secrets.PACKAGE_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "${TOKEN:-}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
-          for f in "${{ inputs.pkgname }}"-*.pkg.tar.zst; do
+          [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
+          for f in ${{ inputs.pkgname }}-*.pkg.tar.zst; do
             code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
-              --user "publish:${TOKEN}" --upload-file "$f" \
+              --user "publish:${{ secrets.PACKAGE_TOKEN }}" --upload-file "$f" \
               "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost/x86_64")
             case "$code" in
               200|201) echo "published $f" ;;
@@ -88,9 +84,9 @@ jobs:
             esac
           done
 
-      - name: checksums + release
+      - name: checksums
         if: startsWith(github.ref, 'refs/tags/v')
-        run: b2sum "${{ inputs.pkgname }}"-*.pkg.tar.zst > b2sums.txt
+        run: b2sum ${{ inputs.pkgname }}-*.pkg.tar.zst > b2sums.txt
 
       - uses: https://gitea.com/actions/release-action@main
         if: startsWith(github.ref, 'refs/tags/v')
