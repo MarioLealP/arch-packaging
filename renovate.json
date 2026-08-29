@@ -1,17 +1,33 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommitsDisabled"],
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommitsDisabled"
+  ],
   "timezone": "Europe/Lisbon",
-  "schedule": ["* 4-7 * * 0"],
+  "schedule": [
+    "* 4-7 * * 0"
+  ],
   "minimumReleaseAge": "7 days",
-  "labels": ["renovate"],
+  "labels": [
+    "renovate"
+  ],
   "automerge": false,
   "packageRules": [
     {
-      "description": "this repo IS the shared pipeline — every bump (checkout/rust-cache/release-action, archlinux base image) is a reviewed PR, never auto-merged",
-      "matchPackageNames": ["*"],
+      "description": "this repo IS the shared pipeline \u2014 every bump (checkout/rust-cache/release-action, archlinux base image) is a reviewed PR, never auto-merged",
+      "matchPackageNames": [
+        "*"
+      ],
       "automerge": false,
       "dependencyDashboardApproval": true
     }
+  ],
+  "ignoreDeps": [
+    "pkgs/packaging"
+  ],
+  "ignorePaths": [
+    "templates/**"
   ]
 }
