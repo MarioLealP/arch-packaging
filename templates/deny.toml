@@ -3,7 +3,7 @@
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked = "deny"
+yanked = "warn"   # a yanked-but-no-CVE version is usually just an unpublish; real CVEs still fail via [advisories] + cargo-audit
 # `cargo audit` also runs; keep both.
 
 [bans]

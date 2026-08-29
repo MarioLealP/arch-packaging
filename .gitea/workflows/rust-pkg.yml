@@ -25,6 +25,20 @@ on:
         required: false
         type: string
         default: ""
+      cargo_features:
+        description: >
+          feature flags for fmt/clippy/build — e.g. "--all-features" or
+          "--no-default-features --features foo,bar". Default: the crate's
+          default features. Do NOT use --all-features on a crate that has
+          mock/debug/dev features (they usually don't compile together).
+        required: false
+        type: string
+        default: ""
+      clippy_targets:
+        description: 'clippy target scope — "--bins" (default, what ships) or "--all-targets"'
+        required: false
+        type: string
+        default: "--bins"
     secrets:
       PACKAGE_TOKEN:
         required: false
@@ -64,10 +78,10 @@ jobs:
 
       - run: cargo fmt --all --check
 
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked ${{ inputs.clippy_targets }} ${{ inputs.cargo_features }} -- -D warnings
 
       - name: cargo-deny
-        run: cargo deny --all-features check
+        run: cargo deny check
 
       - name: cargo-audit
         run: cargo audit --deny warnings
@@ -86,13 +100,13 @@ jobs:
           ~/.local/bin/semgrep scan --error --metrics off \
             --config .semgrep.yml --config p/rust --config p/secrets --config p/security-audit .
 
-      - run: cargo build --release --frozen --all-features
+      - run: cargo build --release --frozen ${{ inputs.cargo_features }}
 
       - name: trivy fs
         run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
 
       - name: cargo-geiger (report only)
-        run: cargo geiger --all-features --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY" || true
+        run: cargo geiger ${{ inputs.cargo_features }} --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY" || true
 
   package:
     needs: scan

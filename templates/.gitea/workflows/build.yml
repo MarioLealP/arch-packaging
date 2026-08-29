@@ -14,5 +14,7 @@ jobs:
     with:
       pkgname: CHANGE-ME
       # extra_pacman_deps: "wayland libxkbcommon vulkan-icd-loader libglvnd mesa fontconfig freetype2 expat"
+      # cargo_features: "--no-default-features --features foo,bar"   # default: the crate's default features. NEVER --all-features if the crate has mock/debug features.
+      # clippy_targets: "--all-targets"                              # default --bins (what ships)
     secrets:
       PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
