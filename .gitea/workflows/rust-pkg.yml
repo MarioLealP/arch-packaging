@@ -141,7 +141,7 @@ jobs:
           for f in ${{ inputs.pkgname }}-*.pkg.tar.zst; do
             code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
               --user "publish:${{ secrets.PACKAGE_TOKEN }}" --upload-file "$f" \
-              "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost/x86_64")
+              "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost")
             case "$code" in
               200|201) echo "published $f" ;;
               409) echo "::error::$f already in the registry — bump pkgver/pkgrel"; exit 1 ;;
