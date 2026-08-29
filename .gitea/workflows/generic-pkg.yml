@@ -94,6 +94,7 @@ jobs:
         run: b2sum ${{ inputs.pkgname }}-*.pkg.tar.zst > b2sums.txt
 
       - uses: https://gitea.com/actions/release-action@main
+        continue-on-error: true   # the package is already in the registry; the Gitea Release is a bonus
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |-
