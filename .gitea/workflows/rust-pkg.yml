@@ -84,7 +84,7 @@ jobs:
         run: cargo deny check
 
       - name: cargo-audit
-        run: cargo audit --deny warnings
+        run: cargo audit   # vulnerabilities fail; yanked/unmaintained are just noise (cargo-deny [advisories] also covers RUSTSEC)
 
       - name: cargo-vet
         run: |
