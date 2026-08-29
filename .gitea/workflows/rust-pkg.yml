@@ -1,0 +1,164 @@
+name: rust-pkg
+
+# Reusable pipeline for Cargo-based packages under the `pkgs` org.
+# Call it from a package repo's .gitea/workflows/build.yml:
+#
+#   jobs:
+#     pkg:
+#       uses: pkgs/packaging/.gitea/workflows/rust-pkg.yml@main
+#       with:
+#         pkgname: my-package
+#       secrets:
+#         PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      pkgname:
+        required: true
+        type: string
+      rust_toolchain:
+        required: false
+        type: string
+        default: stable
+      extra_pacman_deps:
+        description: space-separated extra pacman packages the build needs
+        required: false
+        type: string
+        default: ""
+    secrets:
+      PACKAGE_TOKEN:
+        required: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scan:
+    runs-on: archlinux
+    container:
+      image: archlinux:base-devel
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "4"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - name: toolchain + scanners
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            git nodejs rustup mold pkgconf \
+            cargo-audit cargo-deny \
+            ${{ inputs.extra_pacman_deps }}
+          # semgrep / trivy / cargo-vet: pacman if present, else fall back
+          pacman -S --noconfirm --needed semgrep trivy || true
+          command -v semgrep >/dev/null || pipx install semgrep || pip install --break-system-packages semgrep
+          command -v trivy   >/dev/null || { curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin; }
+          rustup default "${{ inputs.rust_toolchain }}"
+          rustup component add clippy rustfmt
+          command -v cargo-vet >/dev/null || cargo install cargo-vet --locked
+
+      - uses: actions/checkout@v4
+
+      - uses: https://github.com/Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo-deny (advisories, licenses, bans, sources)
+        run: cargo deny --all-features check
+
+      - name: cargo-audit
+        run: cargo audit --deny warnings
+
+      - name: cargo-vet
+        run: |
+          set -euo pipefail
+          if ! cargo vet --locked ; then
+            echo "::error::cargo-vet: unvetted dependencies. Run the triage loop (pkgs/packaging README)."
+            cargo vet suggest || true
+            exit 1
+          fi
+
+      - name: semgrep
+        run: |
+          semgrep scan --error --metrics off \
+            --config .semgrep.yml \
+            --config p/rust --config p/secrets --config p/security-audit .
+
+      - name: build
+        run: cargo build --release --frozen --all-features
+
+      - name: trivy fs
+        run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
+
+      - name: cargo-geiger (report only)
+        run: |
+          cargo install cargo-geiger --locked || true
+          cargo geiger --all-features --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY" || true
+
+  package:
+    needs: scan
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: archlinux
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: deps
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed git rustup mold namcap libarchive \
+            ${{ inputs.extra_pacman_deps }}
+          pacman -S --noconfirm --needed trivy || \
+            curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          rustup default "${{ inputs.rust_toolchain }}"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: makepkg
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          chown -R builder:builder .
+          sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
+
+      - name: trivy rootfs (the built package)
+        run: |
+          set -euo pipefail
+          mkdir _pkg && bsdtar -C _pkg -xf "${{ inputs.pkgname }}"-*.pkg.tar.zst
+          trivy rootfs --severity HIGH,CRITICAL --exit-code 1 --no-progress _pkg
+
+      - name: namcap (report only)
+        run: namcap "${{ inputs.pkgname }}"-*.pkg.tar.zst || true
+
+      - name: publish to the clockmost Arch registry
+        env:
+          TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${TOKEN:-}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
+          for f in "${{ inputs.pkgname }}"-*.pkg.tar.zst; do
+            code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
+              --user "publish:${TOKEN}" --upload-file "$f" \
+              "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost/x86_64")
+            case "$code" in
+              200|201) echo "published $f" ;;
+              409) echo "::error::$f already in the registry — bump pkgver or pkgrel"; exit 1 ;;
+              *) echo "::error::upload failed: HTTP $code"; exit 1 ;;
+            esac
+          done
+
+      - name: checksums + gitea release
+        run: b2sum "${{ inputs.pkgname }}"-*.pkg.tar.zst > b2sums.txt
+
+      - uses: https://gitea.com/actions/release-action@main
+        with:
+          files: |-
+            *.pkg.tar.zst
+            b2sums.txt
