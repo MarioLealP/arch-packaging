@@ -86,8 +86,12 @@ jobs:
       - name: cargo-vet
         run: |
           set -euo pipefail
+          if [ ! -f supply-chain/audits.toml ]; then
+            echo "::error::cargo-vet not initialised. Run 'cargo vet init' in the repo and commit supply-chain/ (see pkgs/packaging README)."
+            exit 1
+          fi
           if ! cargo vet --locked; then
-            echo "::error::cargo-vet: unvetted dependencies — run the triage loop (pkgs/packaging README)"
+            echo "::error::cargo-vet: unvetted dependencies — a Claude session triages these (pkgs/packaging README, 'cargo-vet failed')"
             cargo vet suggest || true
             exit 1
           fi

@@ -1,0 +1,37 @@
+# cargo-vet config for supply-chain/config.toml.
+#
+# ── FIRST TIME, in the repo: ──────────────────────────────────────────────────
+#   cargo install cargo-vet --locked
+#   cargo vet init          # grandfathers the WHOLE current Cargo.lock into
+#                           # [exemptions] and writes audits.toml + imports.lock
+#   # then paste the [imports.*] block below into the generated config.toml
+#   git add supply-chain/ && git commit -m "cargo-vet: init"
+#
+# After that, `cargo vet` in CI only flags NEW crates / version bumps — the
+# delta. A Claude session triages those (pkgs/packaging README "cargo-vet
+# failed"): read the crate/diff, then `cargo vet certify`. Chip the exemptions
+# down over time; never let them grow silently.
+
+[cargo-vet]
+version = "0.10"
+
+[policy.crates-io]
+audit-as-crates-io = true
+
+[imports.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
+[imports.bytecodealliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+
+[imports.embark]
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/main/audits.toml"
+
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
+[imports.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
