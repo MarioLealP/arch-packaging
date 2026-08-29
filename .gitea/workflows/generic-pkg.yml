@@ -55,7 +55,12 @@ jobs:
         run: |
           set -euo pipefail
           useradd -m builder
+          # let makepkg's git+ sources clone private pkgs/ repos via the internal endpoint
+          git config --system url."http://gitea-server:3000/".insteadOf "https://git.clockmost.com/"
+          printf 'machine gitea-server\n  login x-access-token\n  password %s\n' "${{ github.token }}" > /home/builder/.netrc
+          chmod 600 /home/builder/.netrc && chown builder:builder /home/builder/.netrc
           chown -R builder:builder .
+          sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
 
       - name: trivy rootfs (built package)
