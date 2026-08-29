@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           pacman -Syu --noconfirm --needed \
             nodejs git rustup mold pkgconf sccache namcap \
-            cargo-audit cargo-deny cargo-geiger python-pipx \
+            cargo-deny cargo-geiger python-pipx \
             trivy ${{ inputs.extra_pacman_deps }}
           rustup default ${{ inputs.rust_toolchain }}
           rustup component add clippy rustfmt
@@ -80,11 +80,8 @@ jobs:
 
       - run: cargo clippy --locked ${{ inputs.clippy_targets }} ${{ inputs.cargo_features }} -- -D warnings
 
-      - name: cargo-deny
+      - name: cargo-deny (advisories + licenses + bans + sources)
         run: cargo deny check
-
-      - name: cargo-audit
-        run: cargo audit   # vulnerabilities fail; yanked/unmaintained are just noise (cargo-deny [advisories] also covers RUSTSEC)
 
       - name: cargo-vet
         run: |

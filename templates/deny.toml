@@ -1,16 +1,21 @@
-# cargo-deny — supply-chain policy. Copy into each Rust package repo unchanged
-# unless the project genuinely needs an exception (then comment why).
+# cargo-deny — supply-chain policy. Copy into each Rust package repo. This is the
+# single advisory/license/source gate (the pipeline no longer runs a separate
+# `cargo audit` — cargo-deny's [advisories] uses the same RUSTSEC DB).
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked = "warn"   # a yanked-but-no-CVE version is usually just an unpublish; real CVEs still fail via [advisories] + cargo-audit
-# `cargo audit` also runs; keep both.
+yanked = "warn"          # a yanked-but-no-CVE version is usually just an unpublish
+unmaintained = "workspace"   # "unmaintained" != vulnerable; only flag direct deps
+ignore = [
+  # per-advisory exceptions — ALWAYS with a one-line reason and a link.
+  # "RUSTSEC-XXXX-YYYY",  # why this is acceptable for this package
+]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
-# deny crates that are common malware/typosquat or that pull huge attack surface
-# for no reason in a desktop app:
+# git deps carry no version req and read as wildcards; Cargo.lock still pins the
+# exact commit and Renovate + the full scan gate every bump.
+wildcards = "allow"
 deny = [
   { name = "openssl-sys" },     # prefer rustls
 ]
@@ -19,9 +24,9 @@ deny = [
 version = 2
 allow = [
   "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
-  "Unicode-3.0", "Unicode-DFS-2016", "MPL-2.0", "CC0-1.0",
-  "OpenSSL",
+  "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "BSL-1.0",
+  "Unicode-3.0", "Unicode-DFS-2016", "MPL-2.0", "CC0-1.0", "OpenSSL",
+  # "GPL-3.0-only",   # uncomment if your package itself is GPL
 ]
 confidence-threshold = 0.9
 
@@ -30,5 +35,16 @@ confidence-threshold = 0.9
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# add the exact libcosmic / smithay git orgs a project needs, e.g.:
-allow-org = { github = ["pop-os", "smithay"] }
+allow-org = { github = [] }   # add the exact GitHub orgs of any `git =` deps
+
+# ─── COSMIC / libcosmic desktop stack ────────────────────────────────────────
+# libcosmic has no crates.io release, pins upstreams by git, and ships several
+# workspace crates with no `license` field. If you depend on libcosmic, merge
+# this in (proven by cosmic-ext-peek-switcher):
+#
+# [advisories] ignore += "RUSTSEC-2026-0194", "RUSTSEC-2026-0195"  # quick-xml DoS — build-time only in wayland-scanner, parses trusted bundled protocol XML
+# [sources] allow-org.github = ["pop-os", "smithay", "iced-rs", "jackpot51"]
+# [[licenses.clarify]] for: cosmic-config* / cosmic-theme -> "MPL-2.0";
+#   cosmic-bg-config / cosmic-comp-config / cosmic-panel-config /
+#   xdg-shell-wrapper-config / cosmic-settings-config / cosmic-settings-daemon -> "GPL-3.0-only";
+#   dnd / mime / apply -> "MIT"
