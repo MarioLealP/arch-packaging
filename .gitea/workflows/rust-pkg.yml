@@ -139,21 +139,36 @@ jobs:
           sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
 
-      - name: trivy rootfs (built package)
+      - name: list built packages
+        id: pkgs
+        run: |
+          set -euo pipefail
+          # makepkg emits <name>-<ver>.pkg.tar.zst and, when the debug option is
+          # on (Arch default), <name>-debug-<ver>.pkg.tar.zst too.
+          shopt -s nullglob
+          all=( ${{ inputs.pkgname }}-*.pkg.tar.zst )
+          main=""
+          for f in "${all[@]}"; do case "$f" in *-debug-*) ;; *) main="$f" ;; esac; done
+          [ -n "$main" ] || { echo "::error::no package built"; exit 1; }
+          echo "main=$main"       >> "$GITHUB_OUTPUT"
+          echo "all=${all[*]}"    >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${all[@]}"
+
+      - name: trivy rootfs (the shipped package)
         run: |
           set -euo pipefail
           mkdir _pkg
-          bsdtar -C _pkg -xf ${{ inputs.pkgname }}-*.pkg.tar.zst
+          bsdtar -C _pkg -xf "${{ steps.pkgs.outputs.main }}"
           trivy rootfs --severity HIGH,CRITICAL --exit-code 1 --no-progress _pkg
 
       - name: namcap (report only)
-        run: namcap ${{ inputs.pkgname }}-*.pkg.tar.zst || true
+        run: namcap "${{ steps.pkgs.outputs.main }}" || true
 
       - name: publish to the clockmost Arch registry
         run: |
           set -euo pipefail
           [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
-          for f in ${{ inputs.pkgname }}-*.pkg.tar.zst; do
+          for f in ${{ steps.pkgs.outputs.all }}; do
             code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
               --user "publish:${{ secrets.PACKAGE_TOKEN }}" --upload-file "$f" \
               "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost")
@@ -165,7 +180,7 @@ jobs:
           done
 
       - name: checksums
-        run: b2sum ${{ inputs.pkgname }}-*.pkg.tar.zst > b2sums.txt
+        run: b2sum ${{ steps.pkgs.outputs.all }} > b2sums.txt
 
       - uses: https://gitea.com/actions/release-action@main
         continue-on-error: true   # the package is already in the registry; the Gitea Release is a bonus
