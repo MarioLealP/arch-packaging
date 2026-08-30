@@ -48,6 +48,22 @@ git add supply-chain/audits.toml && git commit -m "vet: <crate> <version>" && gi
 
 Imported audit sets: mozilla, google, bytecodealliance, embark-studios, isrg, zcash.
 
+
+## First-build failures — the common ones
+
+Proven while onboarding `cosmic-ext-peek-switcher` (a full libcosmic app):
+
+| CI dies at | meaning | fix |
+|---|---|---|
+| `cargo clippy` — errors in `backend::mock` / dev code | `--all-features` turned on mock/debug features that don't compile together | leave `cargo_features` at default; if you must, `--no-default-features --features x,y` |
+| `cargo-deny` — license of a `git =` crate | upstream crate has no `license` field | `[[licenses.clarify]]` in `deny.toml` (see the COSMIC block) |
+| `cargo-deny` — `unknown-git`/`unknown-registry` | a dep pulls from a git org not on the allow-list | add the exact org to `[sources].allow-org.github` |
+| `cargo-deny` — advisory (`RUSTSEC-…`) | real RUSTSEC hit | fix it (`cargo update`), or `[advisories].ignore` **with a one-line reason** if it's genuinely not exploitable in your usage |
+| `cargo vet` — "not initialised" | no `supply-chain/audits.toml` | `cargo vet init` in the repo, commit `supply-chain/` |
+| `semgrep` — ERROR on your `unsafe` / `Command::new` | the custom rules flag anything that shells out or does FFI | `// nosemgrep: <rule-id>  <why>` on the line, only after you've confirmed it's fine |
+| `cargo build` — `mold: fatal: library not found: X` | the binary links `libX` at link time and it's not installed | add `libX` (Arch package name) to `extra_pacman_deps` in `build.yml` |
+| `trivy rootfs` / `namcap` — `<name>-debug-… : Not found in archive` | makepkg emitted a split `-debug` package and an old pipeline glob choked | pipeline handles it now; or `options=('!debug')` in the PKGBUILD |
+
 ## Client (pacman)
 
 See `~/runbooks/clockmost-packages.md` on the clockmost host, or the
