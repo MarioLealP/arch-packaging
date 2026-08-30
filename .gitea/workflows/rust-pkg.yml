@@ -1,46 +1,56 @@
 name: rust-pkg
 
 # Reusable pipeline for Cargo-based packages under the `pkgs` org.
+#
 #   jobs:
 #     pkg:
 #       uses: pkgs/packaging/.gitea/workflows/rust-pkg.yml@main
 #       with: { pkgname: my-package }
 #       secrets: { PACKAGE_TOKEN: '${{ secrets.PACKAGE_TOKEN }}' }
 #
-# NOTE: each job does a cold `pacman -Syu` + `cargo install cargo-vet`. Once this
-# is proven, bake a pkgs/ci image (see ~/runbooks/clockmost-packages.md) and set
-# `image:` to it — cuts each run from minutes to seconds.
+# Two jobs:
+#   scan     — every push + PR. lint -> supply-chain -> build -> filesystem scan.
+#              Blocks merge. A per-gate ✅/❌ table is written to the run summary.
+#   package  — tag (v*) only. makepkg -> scan the built package -> publish.
+#              Blocks the registry upload.
+#
+# Each job cold-installs its toolchain + scanners (~2 min). Point `image:` at a
+# baked pkgs/ci image to cut that to seconds — see ~/runbooks/clockmost-packages.md.
 
 on:
   workflow_call:
     inputs:
       pkgname:
+        description: pacman package name (matches PKGBUILD `pkgname`)
         required: true
         type: string
       rust_toolchain:
+        description: 'rustup toolchain, e.g. "1.93.0" or "stable"'
         required: false
         type: string
         default: stable
       extra_pacman_deps:
+        description: space-separated system libs the crate links at build time
         required: false
         type: string
         default: ""
       cargo_features:
         description: >
-          feature flags for fmt/clippy/build — e.g. "--all-features" or
+          feature flags for clippy + build — e.g. "--all-features" or
           "--no-default-features --features foo,bar". Default: the crate's
-          default features. Do NOT use --all-features on a crate that has
-          mock/debug/dev features (they usually don't compile together).
+          default features. Never --all-features on a crate with mock/dev
+          features (they usually don't compile together).
         required: false
         type: string
         default: ""
       clippy_targets:
-        description: 'clippy target scope — "--bins" (default, what ships) or "--all-targets"'
+        description: 'clippy scope — "--bins" (default, what ships) or "--all-targets"'
         required: false
         type: string
         default: "--bins"
     secrets:
       PACKAGE_TOKEN:
+        description: write:package token for the Arch registry (release only)
         required: false
 
 defaults:
@@ -54,40 +64,59 @@ env:
 
 jobs:
   scan:
+    name: scan (lint · supply-chain · build)
     runs-on: archlinux
     container:
       image: archlinux:base-devel
     steps:
-      - name: toolchain + scanners
+      - name: Install toolchain + scanners
         run: |
           set -euo pipefail
+          echo "::group::pacman -Syu"
           pacman -Syu --noconfirm --needed \
             nodejs git rustup mold pkgconf sccache namcap \
             cargo-deny cargo-geiger python-pipx \
             trivy ${{ inputs.extra_pacman_deps }}
+          echo "::endgroup::"
+          echo "::group::rustup ${{ inputs.rust_toolchain }} + components"
           rustup default ${{ inputs.rust_toolchain }}
           rustup component add clippy rustfmt
+          echo "::endgroup::"
+          echo "::group::pipx install semgrep"
           pipx install semgrep
+          echo "::endgroup::"
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      - name: Restore cargo + target cache
+        uses: https://github.com/Swatinem/rust-cache@v2
 
-      - name: install cargo-vet (cached by rust-cache)
-        run: command -v cargo-vet || cargo install cargo-vet --locked
+      - name: Install cargo-vet + cargo-machete (cached)
+        run: |
+          set -euo pipefail
+          command -v cargo-vet     || cargo install cargo-vet --locked
+          command -v cargo-machete || cargo install cargo-machete --locked
 
-      - run: cargo fmt --all --check
+      # ---- lint -------------------------------------------------------------
+      - name: rustfmt — formatting
+        run: cargo fmt --all --check
 
-      - run: cargo clippy --locked ${{ inputs.clippy_targets }} ${{ inputs.cargo_features }} -- -D warnings
+      - name: clippy — lints (-D warnings)
+        run: cargo clippy --locked ${{ inputs.clippy_targets }} ${{ inputs.cargo_features }} -- -D warnings
 
-      - name: cargo-deny (advisories + licenses + bans + sources)
+      - name: cargo-machete — unused dependencies
+        run: cargo machete --with-metadata
+
+      # ---- supply chain ---------------------------------------------------
+      - name: cargo-deny — advisories · licenses · bans · source allow-list
         run: cargo deny check
 
-      - name: cargo-vet
+      - name: cargo-vet — every dependency vetted or exempted
         run: |
           set -euo pipefail
           if [ ! -f supply-chain/audits.toml ]; then
-            echo "::error::cargo-vet not initialised. Run 'cargo vet init' in the repo and commit supply-chain/ (see pkgs/packaging README)."
+            echo "::error::cargo-vet not initialised — run 'cargo vet init' in the repo and commit supply-chain/ (pkgs/packaging README)"
             exit 1
           fi
           if ! cargo vet --locked; then
@@ -96,38 +125,61 @@ jobs:
             exit 1
           fi
 
-      - name: semgrep
+      - name: semgrep — SAST (rust · secrets · security-audit · custom)
         run: |
           ~/.local/bin/semgrep scan --error --metrics off \
             --config .semgrep.yml --config p/rust --config p/secrets --config p/security-audit .
 
-      - run: cargo build --release --frozen ${{ inputs.cargo_features }}
+      # ---- build + fs scan ----------------------------------------------
+      - name: cargo build --release
+        run: cargo build --release --frozen ${{ inputs.cargo_features }}
 
-      - name: trivy fs
+      - name: trivy fs — vulns · secrets · misconfig in the tree
         run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
 
-      - name: cargo-geiger (report only)
-        run: cargo geiger ${{ inputs.cargo_features }} --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY" || true
+      - name: cargo-geiger — unsafe surface (report only)
+        run: |
+          {
+            echo "### cargo-geiger — \`unsafe\` in the dependency tree"
+            echo '```'
+            cargo geiger ${{ inputs.cargo_features }} --output-format Ascii 2>&1 | tail -40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### scan — \`${{ inputs.pkgname }}\` @ ${GITHUB_SHA::8}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| gate | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| rustfmt · clippy · cargo-machete | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| cargo-deny · cargo-vet · semgrep | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| cargo build --release · trivy fs | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
 
   package:
+    name: package (makepkg · scan · publish)
     needs: scan
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: archlinux
     container:
       image: archlinux:base-devel
     steps:
-      - name: deps
+      - name: Install toolchain + tools
         run: |
           set -euo pipefail
+          echo "::group::pacman -Syu"
           pacman -Syu --noconfirm --needed \
             nodejs git rustup mold namcap libarchive trivy ${{ inputs.extra_pacman_deps }}
+          echo "::endgroup::"
           rustup default ${{ inputs.rust_toolchain }}
 
-      - uses: actions/checkout@v4
+      - name: Checkout (full history for pkgver/tags)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: makepkg
+      - name: makepkg — build the package
         run: |
           set -euo pipefail
           useradd -m builder
@@ -139,52 +191,62 @@ jobs:
           sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
 
-      - name: list built packages
+      - name: Identify built packages
         id: pkgs
         run: |
           set -euo pipefail
-          # makepkg emits <name>-<ver>.pkg.tar.zst and, when the debug option is
-          # on (Arch default), <name>-debug-<ver>.pkg.tar.zst too.
           shopt -s nullglob
           all=( ${{ inputs.pkgname }}-*.pkg.tar.zst )
           main=""
           for f in "${all[@]}"; do case "$f" in *-debug-*) ;; *) main="$f" ;; esac; done
-          [ -n "$main" ] || { echo "::error::no package built"; exit 1; }
-          echo "main=$main"       >> "$GITHUB_OUTPUT"
-          echo "all=${all[*]}"    >> "$GITHUB_OUTPUT"
-          printf '%s\n' "${all[@]}"
+          [ -n "$main" ] || { echo "::error::no package produced"; exit 1; }
+          echo "main=$main"    >> "$GITHUB_OUTPUT"
+          echo "all=${all[*]}" >> "$GITHUB_OUTPUT"
+          printf '  %s\n' "${all[@]}"
 
-      - name: trivy rootfs (the shipped package)
+      - name: trivy rootfs — scan the shipped package contents
         run: |
           set -euo pipefail
           mkdir _pkg
           bsdtar -C _pkg -xf "${{ steps.pkgs.outputs.main }}"
           trivy rootfs --severity HIGH,CRITICAL --exit-code 1 --no-progress _pkg
 
-      - name: namcap (report only)
+      - name: namcap — packaging lint (report only)
         run: namcap "${{ steps.pkgs.outputs.main }}" || true
 
-      - name: publish to the clockmost Arch registry
+      - name: Publish to the clockmost Arch registry
         run: |
           set -euo pipefail
-          [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
+          [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed by the caller"; exit 1; }
           for f in ${{ steps.pkgs.outputs.all }}; do
             code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
               --user "publish:${{ secrets.PACKAGE_TOKEN }}" --upload-file "$f" \
               "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost")
             case "$code" in
               200|201) echo "published $f" ;;
-              409) echo "::error::$f already in the registry — bump pkgver/pkgrel"; exit 1 ;;
-              *) echo "::error::upload failed: HTTP $code"; exit 1 ;;
+              409) echo "::error::$f already in the registry — bump pkgver or pkgrel"; exit 1 ;;
+              *)   echo "::error::upload of $f failed: HTTP $code"; exit 1 ;;
             esac
           done
 
-      - name: checksums
+      - name: Checksums
         run: b2sum ${{ steps.pkgs.outputs.all }} > b2sums.txt
 
-      - uses: https://gitea.com/actions/release-action@main
-        continue-on-error: true   # the package is already in the registry; the Gitea Release is a bonus
+      - name: Gitea release (bonus — the registry upload is the deliverable)
+        uses: https://gitea.com/actions/release-action@main
+        continue-on-error: true
         with:
           files: |-
             *.pkg.tar.zst
             b2sums.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### package — \`${{ inputs.pkgname }}\` ${GITHUB_REF_NAME}"
+            echo ""
+            echo "Built: \`${{ steps.pkgs.outputs.all }}\`"
+            echo ""
+            echo "Published to \`[clockmost]\` — clients get it on the next \`pacman -Syu\`."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -27,31 +27,33 @@ defaults:
 
 jobs:
   package:
+    name: package (scan · makepkg · publish)
     runs-on: archlinux
     container:
       image: archlinux:base-devel
     steps:
-      - name: deps
+      - name: Install tools
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm --needed \
             nodejs git namcap libarchive shellcheck trivy ${{ inputs.extra_pacman_deps }}
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: trivy fs (secrets, misconfig)
+      - name: trivy fs — secrets · misconfig
         run: trivy fs --scanners secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
 
-      - name: shellcheck
+      - name: shellcheck — all *.sh
         run: |
           set -euo pipefail
           shopt -s globstar nullglob
           f=(**/*.sh)
           [ ${#f[@]} -eq 0 ] || shellcheck "${f[@]}"
 
-      - name: makepkg
+      - name: makepkg — build the package
         run: |
           set -euo pipefail
           useradd -m builder
@@ -63,22 +65,34 @@ jobs:
           sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
 
-      - name: trivy rootfs (built package)
+      - name: Identify built packages
+        id: pkgs
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          all=( ${{ inputs.pkgname }}-*.pkg.tar.zst )
+          main=""
+          for f in "${all[@]}"; do case "$f" in *-debug-*) ;; *) main="$f" ;; esac; done
+          [ -n "$main" ] || { echo "::error::no package produced"; exit 1; }
+          echo "main=$main"    >> "$GITHUB_OUTPUT"
+          echo "all=${all[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: trivy rootfs — scan the shipped package contents
         run: |
           set -euo pipefail
           mkdir _pkg
-          bsdtar -C _pkg -xf ${{ inputs.pkgname }}-*.pkg.tar.zst
+          bsdtar -C _pkg -xf "${{ steps.pkgs.outputs.main }}"
           trivy rootfs --severity HIGH,CRITICAL --exit-code 1 --no-progress _pkg
 
-      - name: namcap (report only)
-        run: namcap ${{ inputs.pkgname }}-*.pkg.tar.zst || true
+      - name: namcap — packaging lint (report only)
+        run: namcap "${{ steps.pkgs.outputs.main }}" || true
 
-      - name: publish to the clockmost Arch registry
+      - name: Publish to the clockmost Arch registry
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed"; exit 1; }
-          for f in ${{ inputs.pkgname }}-*.pkg.tar.zst; do
+          for f in ${{ steps.pkgs.outputs.all }}; do
             code=$(curl -sS -o /dev/stderr -w '%{http_code}' \
               --user "publish:${{ secrets.PACKAGE_TOKEN }}" --upload-file "$f" \
               "${GITHUB_SERVER_URL}/api/packages/pkgs/arch/clockmost")
@@ -91,10 +105,11 @@ jobs:
 
       - name: checksums
         if: startsWith(github.ref, 'refs/tags/v')
-        run: b2sum ${{ inputs.pkgname }}-*.pkg.tar.zst > b2sums.txt
+        run: b2sum ${{ steps.pkgs.outputs.all }} > b2sums.txt
 
-      - uses: https://gitea.com/actions/release-action@main
-        continue-on-error: true   # the package is already in the registry; the Gitea Release is a bonus
+      - name: Gitea release (bonus)
+        uses: https://gitea.com/actions/release-action@main
+        continue-on-error: true
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |-
