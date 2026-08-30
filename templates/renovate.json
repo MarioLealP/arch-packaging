@@ -12,7 +12,7 @@
   "automerge": false,
   "packageRules": [
     {
-      "description": "third-party code — every bump is a reviewed PR; the CI supply-chain gates (cargo-deny/audit/vet/semgrep) run on it before it can merge",
+      "description": "third-party code — every bump is a reviewed PR; the CI supply-chain gates (cargo-deny / cargo-vet / semgrep) run on it before it can merge",
       "matchManagers": ["cargo"],
       "automerge": false,
       "dependencyDashboardApproval": false

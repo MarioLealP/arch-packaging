@@ -1,6 +1,9 @@
-# Maintainer: <you> <email>
-# Template — builds from the pushed git tag, so this file works in CI and for
-# a plain `makepkg -si`. Replace the <...> bits.
+# Maintainer: <you> <you@example.com>
+#
+# The pkgs/ CI checks out the tagged commit and runs makepkg in place, so this
+# builds straight from $startdir (same as pkgs/clockmost-hello) — no git+ source,
+# which would need auth for a private repo and the tag to already exist.
+# `makepkg -si` from a normal clone of the repo also works ($startdir = the clone).
 
 pkgname=<name>
 pkgver=0.1.0
@@ -8,35 +11,32 @@ pkgrel=1
 pkgdesc="<one line>"
 arch=('x86_64')
 url="https://git.clockmost.com/pkgs/${pkgname}"
-license=('GPL-3.0-only')
+license=('GPL-3.0-only')       # match your project's real license
 depends=(
-  # first guess — tighten from the CI `namcap` report on the first release
+  # first guess — the CI `namcap` step prints what to add/drop after the build
   'gcc-libs' 'glibc'
 )
 makedepends=('rust' 'cargo' 'git' 'pkgconf' 'mold')
-options=('!lto')
-source=("git+${url}.git#tag=v${pkgver}")
-b2sums=('SKIP')
+# !debug: skip the split -debug package (simplest — the pipeline can handle it
+#   either way, but you rarely want debug symbols for a desktop utility).
+options=('!lto' '!debug')
+# install="${pkgname}.install"   # uncomment if you ship a .install file
 
 prepare() {
-  cd "$pkgname"
+  cd "$startdir"
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd "$pkgname"
+  cd "$startdir"
   export RUSTFLAGS="-C link-arg=-fuse-ld=mold ${RUSTFLAGS:-}"
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release --all-features
-}
-
-check() {
-  cd "$pkgname"
-  cargo test --frozen --release --all-features || true
+  # default features only — NEVER --all-features if the crate has mock/dev features
+  cargo build --frozen --release
 }
 
 package() {
-  cd "$pkgname"
+  cd "$startdir"
   install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   [ -f README.md ] && install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
