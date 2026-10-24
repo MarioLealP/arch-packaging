@@ -66,5 +66,5 @@ Proven while onboarding `cosmic-ext-peek-switcher` (a full libcosmic app):
 
 ## Client (pacman)
 
-See `~/runbooks/clockmost-packages.md` on the clockmost host, or the
+See the
 `/clockmost-package` skill.
