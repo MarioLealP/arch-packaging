@@ -75,8 +75,10 @@ jobs:
           echo "::group::pacman -Syu"
           pacman -Syu --noconfirm --needed \
             nodejs git rustup mold pkgconf sccache namcap \
-            cargo-deny cargo-geiger python-pipx \
+            cargo-deny cargo-geiger python-pipx python-filelock \
             trivy ${{ inputs.extra_pacman_deps }}
+          # python-filelock: Arch's pipx imports it but doesn't depend on it (2026-10-25: every scan died at
+          # "pipx install semgrep" with ModuleNotFoundError: filelock)
           echo "::endgroup::"
           echo "::group::rustup ${{ inputs.rust_toolchain }} + components"
           rustup default ${{ inputs.rust_toolchain }}
