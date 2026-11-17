@@ -93,6 +93,10 @@ jobs:
 
       - name: Restore cargo + target cache
         uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          # only builds of main save a cache entry; pull requests and tags only read one. Every save is ~770 MB on the
+          # runner's disk and a Renovate batch made 12 of them in 90 minutes (cm-kx8h, 2026-11-17).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-vet + cargo-machete (cached)
         run: |
