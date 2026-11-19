@@ -77,7 +77,7 @@ jobs:
   scan:
     name: scan (lint · supply-chain · build)
     outputs:                      # TEST VARIANT — feeds the cache-evidence job
-      tc_hit: ${{ steps.target-cache.outputs.cache-hit }}
+      tc_hit: ${{ steps.target-cache-du.outputs.hit }}
       tc_key: ${{ steps.target-cache-du.outputs.key }}
       tc_du: ${{ steps.target-cache-du.outputs.du }}
       tc_save: ${{ steps.target-save.outcome }}
@@ -172,7 +172,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --frozen ${{ inputs.cargo_features }} 2>&1 | tee build.out
-          echo "comp=$(grep -cE '^[[:space:]]+Compiling ' build.out || true)" >> "$GITHUB_OUTPUT"
+          echo "comp=$(sed 's/\x1b\[[0-9;]*m//g' build.out | grep -cE '^[[:space:]]+Compiling ' || true)" >> "$GITHUB_OUTPUT"
 
       - name: trivy fs — vulns · secrets · misconfig in the tree
         run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
@@ -200,6 +200,10 @@ jobs:
         if: always()
         run: |
           echo "du=$(du -sh target 2>/dev/null | cut -f1)" >> "$GITHUB_OUTPUT"
+          case "${{ steps.target-cache.outputs.cache-hit }}" in
+            true|True) echo "hit=1" >> "$GITHUB_OUTPUT" ;;
+            *)         echo "hit=0" >> "$GITHUB_OUTPUT" ;;
+          esac
           case "${{ steps.target-cache.outputs.cache-matched-key }}" in
             pkgs-target-*) echo "key=matched" >> "$GITHUB_OUTPUT" ;;
             *)             echo "key=none"    >> "$GITHUB_OUTPUT" ;;
@@ -220,7 +224,7 @@ jobs:
     name: package (makepkg · scan · publish)
     needs: scan
     outputs:                      # TEST VARIANT — feeds the cache-evidence job
-      tc_hit: ${{ steps.target-cache.outputs.cache-hit }}
+      tc_hit: ${{ steps.target-cache-du.outputs.hit }}
       tc_key: ${{ steps.target-cache-du.outputs.key }}
       tc_du: ${{ steps.target-cache-du.outputs.du }}
       tc_save: ${{ steps.target-save.outcome }}
@@ -271,7 +275,7 @@ jobs:
           chown -R builder:builder .
           sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps 2>&1 | tee makepkg.out
-          echo "comp=$(grep -cE '^[[:space:]]+Compiling ' makepkg.out || true)" >> "$GITHUB_OUTPUT"
+          echo "comp=$(sed 's/\x1b\[[0-9;]*m//g' makepkg.out | grep -cE '^[[:space:]]+Compiling ' || true)" >> "$GITHUB_OUTPUT"
           root_hash=$(rustc -vV | sed -n 's/^commit-hash: //p')
           bld_hash=$(sudo -u builder bash -c 'rustc -vV' | sed -n 's/^commit-hash: //p')
           if [ "$root_hash" = "$bld_hash" ] && [ -n "$root_hash" ]; then
@@ -294,6 +298,10 @@ jobs:
         if: always()
         run: |
           echo "du=$(du -sh target 2>/dev/null | cut -f1)" >> "$GITHUB_OUTPUT"
+          case "${{ steps.target-cache.outputs.cache-hit }}" in
+            true|True) echo "hit=1" >> "$GITHUB_OUTPUT" ;;
+            *)         echo "hit=0" >> "$GITHUB_OUTPUT" ;;
+          esac
           case "${{ steps.target-cache.outputs.cache-matched-key }}" in
             pkgs-target-*) echo "key=matched" >> "$GITHUB_OUTPUT" ;;
             *)             echo "key=none"    >> "$GITHUB_OUTPUT" ;;
