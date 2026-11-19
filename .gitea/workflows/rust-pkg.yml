@@ -1,32 +1,32 @@
 name: rust-pkg
 
+# TEST VARIANT (cm-18n verification, 2026-11-19) — NOT the production patch.
+# Differences from pkgs/packaging!cm-18n-target-cache:
+#   * save-if is `always()` (production: main + v* tags only) so test-branch pushes
+#     populate a same-ref cache that a later push can restore (Gitea Runner cache
+#     scoping: a job only sees its own ref + the default branch).
+#   * probes + the cache-evidence job encode cache hit / matched key / target size /
+#     Compiling counts / toolchain parity into the evidence job's NAME — the run
+#     pages are JS-only and job logs are not public.
+#   * publish + Gitea release hard-disabled; callers pass no secrets.
+#
 # Reusable pipeline for Cargo-based packages under the `pkgs` org.
 #
 #   jobs:
 #     pkg:
-#       uses: pkgs/packaging/.gitea/workflows/rust-pkg.yml@main
+#       uses: pkgs/packaging/.gitea/workflows/rust-pkg.yml@<ref>
 #       with: { pkgname: my-package }
 #       secrets: { PACKAGE_TOKEN: '${{ secrets.PACKAGE_TOKEN }}' }
 #
-# Two jobs:
-#   scan     — every push + PR. lint -> supply-chain -> build -> filesystem scan.
-#              Blocks merge. A per-gate ✅/❌ table is written to the run summary.
-#   package  — tag (v*) only. makepkg -> scan the built package -> publish.
-#              Blocks the registry upload.
-#
-# Each job cold-installs its toolchain + scanners (~2 min). Point `image:` at a
-# baked pkgs/ci image to cut that to seconds — see ~/runbooks/clockmost-packages.md.
-#
 # Build caching (cm-18n): a persistent CARGO_TARGET_DIR cache (the checkout's
-# `target/`, what the PKGBUILD template builds into) is restored and saved via
-# the runner's action cache. Keys are exact per lockfile state
-# (`pkgs-target-{scan,pkg}-<pkgname>-<hash of **/Cargo.lock>`) with a per-package
-# `restore-keys` prefix fallback, so a version bump warm-starts from the newest
-# entry instead of rebuilding the whole tree. scan and package keep separate key
-# spaces (their toolchains/flags need not match); saves only from `main` and
-# `v*` tags — never from PRs or branches (cm-kx8h). Entries live in the runner's
-# action cache (`cache.dir: /data/actcache`, runner volume) and are bounded by
-# the existing 3 GB cap timer.
+# `target/`, what the PKGBUILD template builds into) is restored and saved through
+# the runner's built-in action cache. One key space per package:
+# `pkgs-target-<pkgname>-<hash of **/Cargo.lock>` (exact) with the per-package
+# `restore-keys` prefix fallback so a lockfile bump warm-starts from the newest
+# entry. Saves land only where later runs can see them: `main` warms every ref
+# (the default branch is readable from all cache scopes) and a `v*` tag's own save
+# feeds the same run's package job (which runs after scan on the same ref). Entries
+# live on the runner volume (`cache.dir: /data/actcache`), not the registry.
 
 on:
   workflow_call:
@@ -81,6 +81,7 @@ jobs:
       tc_key: ${{ steps.target-cache-du.outputs.key }}
       tc_du: ${{ steps.target-cache-du.outputs.du }}
       tc_save: ${{ steps.target-save.outcome }}
+      tc_comp: ${{ steps.build-probe.outputs.comp }}
     runs-on: archlinux
     container:
       image: archlinux:base-devel
@@ -120,12 +121,12 @@ jobs:
       - name: Restore persistent target cache
         id: target-cache
         uses: actions/cache/restore@v4
-        continue-on-error: true   # TEST VARIANT — never block the build on cache plumbing
+        continue-on-error: true   # cache plumbing must never fail a build
         with:
           path: target
-          key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          key: pkgs-target-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            pkgs-target-scan-${{ inputs.pkgname }}-
+            pkgs-target-${{ inputs.pkgname }}-
 
       - name: Install cargo-vet + cargo-machete (cached)
         run: |
@@ -167,7 +168,11 @@ jobs:
 
       # ---- build + fs scan ----------------------------------------------
       - name: cargo build --release
-        run: cargo build --release --frozen ${{ inputs.cargo_features }}
+        id: build-probe            # TEST VARIANT — counts fresh compiles as the cache probe
+        run: |
+          set -euo pipefail
+          cargo build --release --frozen ${{ inputs.cargo_features }} 2>&1 | tee build.out
+          echo "comp=$(grep -cE '^[[:space:]]+Compiling ' build.out || true)" >> "$GITHUB_OUTPUT"
 
       - name: trivy fs — vulns · secrets · misconfig in the tree
         run: trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --no-progress .
@@ -183,12 +188,12 @@ jobs:
 
       - name: Save persistent target cache
         id: target-save
-        if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        if: always()               # TEST VARIANT — production gates this to main + v* tags
         uses: actions/cache/save@v4
-        continue-on-error: true   # TEST VARIANT
+        continue-on-error: true
         with:
           path: target
-          key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          key: pkgs-target-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Target cache evidence (test)
         id: target-cache-du
@@ -219,6 +224,8 @@ jobs:
       tc_key: ${{ steps.target-cache-du.outputs.key }}
       tc_du: ${{ steps.target-cache-du.outputs.du }}
       tc_save: ${{ steps.target-save.outcome }}
+      tc_comp: ${{ steps.pkg-probe.outputs.comp }}
+      tc_tool: ${{ steps.pkg-probe.outputs.tool }}
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: archlinux
     container:
@@ -239,21 +246,21 @@ jobs:
           fetch-depth: 0
 
       # The makepkg build writes to the checkout's `target/` (PKGBUILD template:
-      # CARGO_TARGET_DIR=target), so it rides the same persistent cache. Its own
-      # key space (`pkgs-target-pkg-…`): makepkg compiles with makepkg.conf flags
-      # and whatever toolchain `makedepends` resolves, which need not fingerprint
-      # like the scan job's build.
+      # CARGO_TARGET_DIR=target), so it rides the same persistent cache and the
+      # same key space as the scan job: on a tag the scan job's save (same ref,
+      # same commit -> same key) is an exact hit here.
       - name: Restore persistent target cache
         id: target-cache
         uses: actions/cache/restore@v4
-        continue-on-error: true   # TEST VARIANT
+        continue-on-error: true
         with:
           path: target
-          key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          key: pkgs-target-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            pkgs-target-pkg-${{ inputs.pkgname }}-
+            pkgs-target-${{ inputs.pkgname }}-
 
       - name: makepkg — build the package
+        id: pkg-probe             # TEST VARIANT — Compiling count + builder toolchain hash
         run: |
           set -euo pipefail
           useradd -m builder
@@ -263,16 +270,24 @@ jobs:
           chmod 600 /home/builder/.netrc && chown builder:builder /home/builder/.netrc
           chown -R builder:builder .
           sudo -u builder git config --global --add safe.directory '*'
-          sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
+          sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps 2>&1 | tee makepkg.out
+          echo "comp=$(grep -cE '^[[:space:]]+Compiling ' makepkg.out || true)" >> "$GITHUB_OUTPUT"
+          root_hash=$(rustc -vV | sed -n 's/^commit-hash: //p')
+          bld_hash=$(sudo -u builder bash -c 'rustc -vV' | sed -n 's/^commit-hash: //p')
+          if [ "$root_hash" = "$bld_hash" ] && [ -n "$root_hash" ]; then
+            echo "tool=eq" >> "$GITHUB_OUTPUT"
+          else
+            echo "tool=ne" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Save persistent target cache
         id: target-save
-        if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        if: always()               # TEST VARIANT
         uses: actions/cache/save@v4
-        continue-on-error: true   # TEST VARIANT
+        continue-on-error: true
         with:
           path: target
-          key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          key: pkgs-target-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Target cache evidence (test)
         id: target-cache-du
@@ -308,7 +323,7 @@ jobs:
         run: namcap "${{ steps.pkgs.outputs.main }}" || true
 
       - name: Publish to the clockmost Arch registry
-        if: ${{ false }}   # TEST VARIANT — publish disabled: test tags must never touch the registry
+        if: ${{ false }}           # TEST VARIANT — test tags must never touch the registry
         run: |
           set -euo pipefail
           [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed by the caller"; exit 1; }
@@ -327,7 +342,7 @@ jobs:
         run: b2sum ${{ steps.pkgs.outputs.all }} > b2sums.txt
 
       - name: Gitea release (bonus — the registry upload is the deliverable)
-        if: ${{ false }}   # TEST VARIANT — no release objects for test tags
+        if: ${{ false }}           # TEST VARIANT — no release objects for test tags
         uses: https://gitea.com/actions/release-action@main
         continue-on-error: true
         with:
@@ -347,10 +362,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   cache-evidence:
-    # TEST VARIANT ONLY — the run-detail pages are JS-only, so this job encodes
-    # the cache evidence (exact hit / fallback match / target size / save result)
-    # into its NAME, which the anonymous actions/tasks API reports back.
-    name: 'cache-evidence scan=[${{ needs.scan.result }} hit:${{ needs.scan.outputs.tc_hit }} key:${{ needs.scan.outputs.tc_key }} du:${{ needs.scan.outputs.tc_du }} save:${{ needs.scan.outputs.tc_save }}] pkg=[${{ needs.package.result }} hit:${{ needs.package.outputs.tc_hit }} key:${{ needs.package.outputs.tc_key }} du:${{ needs.package.outputs.tc_du }} save:${{ needs.package.outputs.tc_save }}]'
+    # TEST VARIANT ONLY — the run-detail pages are JS-only, so this job encodes the
+    # cache evidence (hit / matched key / target size / compiles / save / toolchain
+    # parity) into its NAME, which the anonymous actions/tasks API reports back.
+    name: 'cache-evidence scan=[${{ needs.scan.result }} hit:${{ needs.scan.outputs.tc_hit }} key:${{ needs.scan.outputs.tc_key }} du:${{ needs.scan.outputs.tc_du }} comp:${{ needs.scan.outputs.tc_comp }} save:${{ needs.scan.outputs.tc_save }}] pkg=[${{ needs.package.result }} hit:${{ needs.package.outputs.tc_hit }} key:${{ needs.package.outputs.tc_key }} du:${{ needs.package.outputs.tc_du }} comp:${{ needs.package.outputs.tc_comp }} tool:${{ needs.package.outputs.tc_tool }} save:${{ needs.package.outputs.tc_save }}]'
     needs: [scan, package]
     if: always()
     runs-on: archlinux
