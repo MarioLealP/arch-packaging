@@ -76,6 +76,11 @@ env:
 jobs:
   scan:
     name: scan (lint · supply-chain · build)
+    outputs:                      # TEST VARIANT — feeds the cache-evidence job
+      tc_hit: ${{ steps.target-cache.outputs.cache-hit }}
+      tc_key: ${{ steps.target-cache-du.outputs.key }}
+      tc_du: ${{ steps.target-cache-du.outputs.du }}
+      tc_save: ${{ steps.target-save.outcome }}
     runs-on: archlinux
     container:
       image: archlinux:base-devel
@@ -115,6 +120,7 @@ jobs:
       - name: Restore persistent target cache
         id: target-cache
         uses: actions/cache/restore@v4
+        continue-on-error: true   # TEST VARIANT — never block the build on cache plumbing
         with:
           path: target
           key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
@@ -176,11 +182,23 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save persistent target cache
+        id: target-save
         if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
         uses: actions/cache/save@v4
+        continue-on-error: true   # TEST VARIANT
         with:
           path: target
           key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Target cache evidence (test)
+        id: target-cache-du
+        if: always()
+        run: |
+          echo "du=$(du -sh target 2>/dev/null | cut -f1)" >> "$GITHUB_OUTPUT"
+          case "${{ steps.target-cache.outputs.cache-matched-key }}" in
+            pkgs-target-*) echo "key=matched" >> "$GITHUB_OUTPUT" ;;
+            *)             echo "key=none"    >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Summary
         if: always()
@@ -196,6 +214,11 @@ jobs:
   package:
     name: package (makepkg · scan · publish)
     needs: scan
+    outputs:                      # TEST VARIANT — feeds the cache-evidence job
+      tc_hit: ${{ steps.target-cache.outputs.cache-hit }}
+      tc_key: ${{ steps.target-cache-du.outputs.key }}
+      tc_du: ${{ steps.target-cache-du.outputs.du }}
+      tc_save: ${{ steps.target-save.outcome }}
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: archlinux
     container:
@@ -223,6 +246,7 @@ jobs:
       - name: Restore persistent target cache
         id: target-cache
         uses: actions/cache/restore@v4
+        continue-on-error: true   # TEST VARIANT
         with:
           path: target
           key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
@@ -242,11 +266,23 @@ jobs:
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
 
       - name: Save persistent target cache
+        id: target-save
         if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
         uses: actions/cache/save@v4
+        continue-on-error: true   # TEST VARIANT
         with:
           path: target
           key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Target cache evidence (test)
+        id: target-cache-du
+        if: always()
+        run: |
+          echo "du=$(du -sh target 2>/dev/null | cut -f1)" >> "$GITHUB_OUTPUT"
+          case "${{ steps.target-cache.outputs.cache-matched-key }}" in
+            pkgs-target-*) echo "key=matched" >> "$GITHUB_OUTPUT" ;;
+            *)             echo "key=none"    >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Identify built packages
         id: pkgs
@@ -272,6 +308,7 @@ jobs:
         run: namcap "${{ steps.pkgs.outputs.main }}" || true
 
       - name: Publish to the clockmost Arch registry
+        if: ${{ false }}   # TEST VARIANT — publish disabled: test tags must never touch the registry
         run: |
           set -euo pipefail
           [ -n "${{ secrets.PACKAGE_TOKEN }}" ] || { echo "::error::PACKAGE_TOKEN not passed by the caller"; exit 1; }
@@ -290,6 +327,7 @@ jobs:
         run: b2sum ${{ steps.pkgs.outputs.all }} > b2sums.txt
 
       - name: Gitea release (bonus — the registry upload is the deliverable)
+        if: ${{ false }}   # TEST VARIANT — no release objects for test tags
         uses: https://gitea.com/actions/release-action@main
         continue-on-error: true
         with:
@@ -307,3 +345,16 @@ jobs:
             echo ""
             echo "Published to \`[clockmost]\` — clients get it on the next \`pacman -Syu\`."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  cache-evidence:
+    # TEST VARIANT ONLY — the run-detail pages are JS-only, so this job encodes
+    # the cache evidence (exact hit / fallback match / target size / save result)
+    # into its NAME, which the anonymous actions/tasks API reports back.
+    name: 'cache-evidence scan=[${{ needs.scan.result }} hit:${{ needs.scan.outputs.tc_hit }} key:${{ needs.scan.outputs.tc_key }} du:${{ needs.scan.outputs.tc_du }} save:${{ needs.scan.outputs.tc_save }}] pkg=[${{ needs.package.result }} hit:${{ needs.package.outputs.tc_hit }} key:${{ needs.package.outputs.tc_key }} du:${{ needs.package.outputs.tc_du }} save:${{ needs.package.outputs.tc_save }}]'
+    needs: [scan, package]
+    if: always()
+    runs-on: archlinux
+    container:
+      image: archlinux:base-devel
+    steps:
+      - run: echo "evidence is in this job's name"
