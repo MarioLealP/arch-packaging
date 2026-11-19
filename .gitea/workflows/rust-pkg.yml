@@ -16,6 +16,17 @@ name: rust-pkg
 #
 # Each job cold-installs its toolchain + scanners (~2 min). Point `image:` at a
 # baked pkgs/ci image to cut that to seconds — see ~/runbooks/clockmost-packages.md.
+#
+# Build caching (cm-18n): a persistent CARGO_TARGET_DIR cache (the checkout's
+# `target/`, what the PKGBUILD template builds into) is restored and saved via
+# the runner's action cache. Keys are exact per lockfile state
+# (`pkgs-target-{scan,pkg}-<pkgname>-<hash of **/Cargo.lock>`) with a per-package
+# `restore-keys` prefix fallback, so a version bump warm-starts from the newest
+# entry instead of rebuilding the whole tree. scan and package keep separate key
+# spaces (their toolchains/flags need not match); saves only from `main` and
+# `v*` tags — never from PRs or branches (cm-kx8h). Entries live in the runner's
+# action cache (`cache.dir: /data/actcache`, runner volume) and are bounded by
+# the existing 3 GB cap timer.
 
 on:
   workflow_call:
@@ -35,7 +46,7 @@ on:
         type: string
         default: ""
       cargo_features:
-        description: >
+        description: >-
           feature flags for clippy + build — e.g. "--all-features" or
           "--no-default-features --features foo,bar". Default: the crate's
           default features. Never --all-features on a crate with mock/dev
@@ -91,12 +102,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore cargo + target cache
+      - name: Restore cargo registry + tool cache
         uses: https://github.com/Swatinem/rust-cache@v2
         with:
+          # registry + ~/.cargo/bin only; `target/` is cached separately below so one
+          # mechanism owns it and the lockfile-hash key can roll over to a fallback.
+          cache-targets: false
           # only builds of main save a cache entry; pull requests and tags only read one. Every save is ~770 MB on the
           # runner's disk and a Renovate batch made 12 of them in 90 minutes (cm-kx8h, 2026-11-17).
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Restore persistent target cache
+        id: target-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target
+          key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pkgs-target-scan-${{ inputs.pkgname }}-
 
       - name: Install cargo-vet + cargo-machete (cached)
         run: |
@@ -152,6 +175,13 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Save persistent target cache
+        if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: pkgs-target-scan-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Summary
         if: always()
         run: |
@@ -185,6 +215,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The makepkg build writes to the checkout's `target/` (PKGBUILD template:
+      # CARGO_TARGET_DIR=target), so it rides the same persistent cache. Its own
+      # key space (`pkgs-target-pkg-…`): makepkg compiles with makepkg.conf flags
+      # and whatever toolchain `makedepends` resolves, which need not fingerprint
+      # like the scan job's build.
+      - name: Restore persistent target cache
+        id: target-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target
+          key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pkgs-target-pkg-${{ inputs.pkgname }}-
+
       - name: makepkg — build the package
         run: |
           set -euo pipefail
@@ -196,6 +240,13 @@ jobs:
           chown -R builder:builder .
           sudo -u builder git config --global --add safe.directory '*'
           sudo -u builder makepkg -f --noconfirm --needed --syncdeps --rmdeps
+
+      - name: Save persistent target cache
+        if: ${{ always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: pkgs-target-pkg-${{ inputs.pkgname }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Identify built packages
         id: pkgs
