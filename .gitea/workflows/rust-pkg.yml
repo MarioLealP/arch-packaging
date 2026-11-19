@@ -80,6 +80,7 @@ jobs:
       tc_hit: ${{ steps.target-cache-du.outputs.hit }}
       tc_key: ${{ steps.target-cache-du.outputs.key }}
       tc_du: ${{ steps.target-cache-du.outputs.du }}
+      tc_zst: ${{ steps.target-cache-du.outputs.zst }}
       tc_save: ${{ steps.target-save.outcome }}
       tc_comp: ${{ steps.build-probe.outputs.comp }}
     runs-on: archlinux
@@ -200,6 +201,14 @@ jobs:
         if: always()
         run: |
           echo "du=$(du -sh target 2>/dev/null | cut -f1)" >> "$GITHUB_OUTPUT"
+          # what the cache entry costs on disk: the actions/cache entry is a zstd
+          # tar of target/ — measure it (T5 probe, cm-18n)
+          zst="?"
+          if [ -d target ]; then
+            tar -I zstd -cf cache-probe.tar.zst target 2>/dev/null && zst="$(du -m cache-probe.tar.zst | cut -f1)M" || zst="fail"
+            rm -f cache-probe.tar.zst
+          fi
+          echo "zst=$zst" >> "$GITHUB_OUTPUT"
           case "${{ steps.target-cache.outputs.cache-hit }}" in
             true|True) echo "hit=1" >> "$GITHUB_OUTPUT" ;;
             *)         echo "hit=0" >> "$GITHUB_OUTPUT" ;;
@@ -373,7 +382,7 @@ jobs:
     # TEST VARIANT ONLY — the run-detail pages are JS-only, so this job encodes the
     # cache evidence (hit / matched key / target size / compiles / save / toolchain
     # parity) into its NAME, which the anonymous actions/tasks API reports back.
-    name: 'cache-evidence scan=[${{ needs.scan.result }} hit:${{ needs.scan.outputs.tc_hit }} key:${{ needs.scan.outputs.tc_key }} du:${{ needs.scan.outputs.tc_du }} comp:${{ needs.scan.outputs.tc_comp }} save:${{ needs.scan.outputs.tc_save }}] pkg=[${{ needs.package.result }} hit:${{ needs.package.outputs.tc_hit }} key:${{ needs.package.outputs.tc_key }} du:${{ needs.package.outputs.tc_du }} comp:${{ needs.package.outputs.tc_comp }} tool:${{ needs.package.outputs.tc_tool }} save:${{ needs.package.outputs.tc_save }}]'
+    name: 'cache-evidence scan=[${{ needs.scan.result }} hit:${{ needs.scan.outputs.tc_hit }} key:${{ needs.scan.outputs.tc_key }} du:${{ needs.scan.outputs.tc_du }} zst:${{ needs.scan.outputs.tc_zst }} comp:${{ needs.scan.outputs.tc_comp }} save:${{ needs.scan.outputs.tc_save }}] pkg=[${{ needs.package.result }} hit:${{ needs.package.outputs.tc_hit }} key:${{ needs.package.outputs.tc_key }} du:${{ needs.package.outputs.tc_du }} comp:${{ needs.package.outputs.tc_comp }} tool:${{ needs.package.outputs.tc_tool }} save:${{ needs.package.outputs.tc_save }}]'
     needs: [scan, package]
     if: always()
     runs-on: archlinux
